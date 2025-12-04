@@ -1,167 +1,269 @@
-import logging
+# bot.py
 import os
-from datetime import datetime, date, timedelta
-from calendar import monthrange
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from dotenv import load_dotenv
-from telegram.ext import MessageHandler, filters
-from database import (
-    init_db, add_booking, get_booking, get_all_bookings_in_date_range,
-    add_sponsor as db_add_sponsor, is_sponsor, get_all_sponsors
+import logging
+from datetime import date, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from db import (
+    init_db, get_user, ensure_user, set_sponsor_status,
+    get_booking, set_booking, cancel_booking  # ← ДОБАВЬ cancel_booking сюда
 )
-
-# Инициализация БД при старте
-init_db()
-
-# Загрузим спонсоров в память (опционально, но ускорит проверки)
-sponsors_cache = get_all_sponsors()
+from dotenv import load_dotenv
 
 load_dotenv()
-# === Настройка логирования ===
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 
-# Отслеживаем username → обновляем кэш спонсоров при необходимости (не обязательно, но полезно для отладки)
-usernames = {}
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))
+ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 
-def get_next_30_days():
+logging.basicConfig(level=logging.INFO)
+
+def in_allowed_topic(update: Update) -> bool:
+    msg = update.effective_message
+    print(msg)
+    return bool(msg and msg.chat_id == ALLOWED_CHAT_ID)
+    # return bool(msg and msg.chat_id == ALLOWED_CHAT_ID)
+
+def get_dates_in_month():
     today = date.today()
-    return [today + timedelta(days=i) for i in range(30)]
+    next_month = (today.replace(day=28) + timedelta(days=4))
+    last_day = next_month - timedelta(days=next_month.day)
+    return [today + timedelta(days=i) for i in range((last_day - today).days + 1)]
 
-
-def date_to_str(d: date) -> str:
-    return d.isoformat()
-
-
-def is_valid_date_in_range(d_str: str) -> bool:
-    """Проверяет, что дата в формате YYYY-MM-DD и попадает в диапазон [сегодня, сегодня+29]."""
-    try:
-        d = datetime.fromisoformat(d_str).date()
-    except ValueError:
-        return False
-    today = date.today()
-    last_day = today + timedelta(days=29)
-    return today <= d <= last_day
-
-
-# === Команды бота ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "Добро пожаловать!\n"
-        "Команды:\n"
-        "/book YYYY-MM-DD — забронировать стол\n"
-        "/list — посмотреть занятые и свободные дни\n"
-        "(Админ) /add_sponsor <user_id> — добавить спонсора"
-    )
-    await update.message.reply_text(msg)
-
-async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    username = user.username  # может быть None
-    user_is_sponsor = is_sponsor(user_id)
-
-    if not context.args:
-        await update.message.reply_text("Укажите дату: /book YYYY-MM-DD")
-        return
-
-    d_str = context.args[0].strip()
-    if not is_valid_date_in_range(d_str):
-        await update.message.reply_text("Некорректная дата/Дата уже прошла. Используйте YYYY-MM-DD в текущем месяце.")
-        return
-
-    d = datetime.fromisoformat(d_str).date()
-    current = get_booking(d)
-
-    if current is None:
-        add_booking(d, user_id, username, user_is_sponsor)
-        await update.message.reply_text(f"✅ Забронировано на {d_str}!")
-    else:
-        if user_is_sponsor:
-            if not current['is_sponsor']:
-                add_booking(d, user_id, username, True)
-                await update.message.reply_text(f"👑 Спонсор! Бронь на {d_str} передана вам.")
-            else:
-                await update.message.reply_text(f"❌ Уже занято другим спонсором.")
-        else:
-            if current['is_sponsor']:
-                await update.message.reply_text(f"❌ Занято спонсором.")
-            else:
-                await update.message.reply_text(f"❌ Уже занято.")
-
-
-async def list_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dates = get_next_30_days()
-    bookings = get_all_bookings_in_date_range(dates)
-
-    lines = []
-    for d in dates:
+# --- Генерация клавиатуры календаря (выносим в отдельную функцию) ---
+async def build_calendar_keyboard():
+    keyboard = []
+    row = []
+    for d in get_dates_in_month():
         d_str = d.isoformat()
-        booking = bookings.get(d_str)
-        if booking:
-            status = "👑" if booking['is_sponsor'] else "👤"
-            username = booking['username']
-            if username:
-                user_display = f"@{username}"
-            else:
-                user_display = f"user{booking['user_id']}"
-            lines.append(f"{d_str}: {status} занято → {user_display}")
-        else:
-            lines.append(f"{d_str}: ✅ свободно")
+        booking = await get_booking(d_str)
+        is_booked = booking is not None
+        is_sponsor_booking = booking["is_sponsor"] if booking else False
+        emoji = "👑" if is_sponsor_booking else "❌" if is_booked else "📅"
+        row.append(InlineKeyboardButton(f"{emoji} {d.strftime('%d.%m')}", callback_data=f"book_{d_str}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
 
-    message = "📅 Бронирования на ближайшие 30 дней:\n\n" + "\n".join(lines)
-    await update.message.reply_text(message)
+# --- /start — показывает календарь ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_topic(update):
+        return
+    user = update.effective_user
+    await ensure_user(user.id, user.username or user.full_name)
+    reply_markup = await build_calendar_keyboard()
+    await update.message.reply_text("📅 Выберите дату:", reply_markup=reply_markup)
 
-# Админ-SUPER-команда: добавить спонсора
-ADMIN_SUPER_USER_ID = os.getenv("ADMIN_SUPER_USER_ID")  # ⚠️ Замените на ваш user_id
+async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-async def add_sponsor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(update.effective_user.id)
-    print(ADMIN_SUPER_USER_ID)
-    if update.effective_user.id != ADMIN_SUPER_USER_ID:
-        await update.message.reply_text("❌ Доступ запрещён.")
+    if not in_allowed_topic(update):
+        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
+    user = query.from_user
+    await ensure_user(user.id, user.username or f"user{user.id}")
+    user_data = await get_user(user.id)
+    is_sponsor = user_data["is_sponsor"]
+
+    date_str = query.data[5:]  # "book_YYYY-MM-DD"
+    target_date = date.fromisoformat(date_str)
+    booking = await get_booking(date_str)
+
+    # Формируем текст
+    if booking:
+        mark = "👑" if booking["is_sponsor"] else "❌"
+        username_display = booking["username"] or f"user{booking['user_id']}"
+        status_line = f"{mark} Забронировано @{username_display}"
+    else:
+        status_line = "Свободно"
+
+    text = f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\nСтатус: {status_line}"
+
+    buttons = []
+
+    # === Кнопка "Забронировать" ===
+    show_book_button = True
+    if booking:
+        if booking["user_id"] == user.id:
+            show_book_button = False  # уже забронировано тобой
+        elif booking["is_sponsor"] and not is_sponsor:
+            show_book_button = False  # обычный не может брать у спонсора
+
+    if show_book_button:
+        buttons.append(InlineKeyboardButton("✅ Забронировать", callback_data=f"confirm_{date_str}"))
+
+    # === Кнопка "Отказаться от брони" ===
+    if booking and booking["user_id"] == user.id:
+        buttons.append(InlineKeyboardButton("🗑️ Отказаться от брони", callback_data=f"cancel_{date_str}"))
+
+    buttons.append(InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar"))
+
+    # Разбиваем кнопки по строкам (макс 2 в строке для читаемости)
+    keyboard = []
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i+2])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+# --- Обработка кнопки "Назад к календарю" ---
+async def back_to_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # 🔒 Проверка топика (для безопасности)
+    if not in_allowed_topic(update):
+        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        return
+
+    reply_markup = await build_calendar_keyboard()
+    await query.edit_message_text("📅 Выберите дату:", reply_markup=reply_markup)
+
+async def sponsor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_topic(update):
+        return
+    if update.effective_user.id != SUPER_ADMIN_ID:
+        await update.message.reply_text("❌ Только супер-админ может выдавать спонсорство.")
+        return
     if not context.args:
-        await update.message.reply_text("Укажите username: /add_sponsor @username")
+        await update.message.reply_text("Использование: /sponsor 123456789")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Укажите ID (число).")
+        return
+    await set_sponsor_status(target_id, True)
+    await update.message.reply_text(f"✅ Пользователь {target_id} — теперь спонсор!")
+
+async def unsponsor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != SUPER_ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /unsponsor 123456789")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Укажите ID (число).")
+        return
+    await set_sponsor_status(target_id, False)
+    await update.message.reply_text(f"❌ Спонсорство у {target_id} отозвано.")
+
+async def post_init(application: Application):
+    await init_db()
+    logging.info("✅ Бот запущен с SQLite (v20+).")
+
+async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # 🔒 Проверка топика
+    if not in_allowed_topic(update):
+        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
-    username = context.args[0].lstrip('@').lower()
-    if username not in usernames:
-        await update.message.reply_text(
-            f"❌ @{username} не найден. Пусть пользователь напишет боту хотя бы раз."
+    user = query.from_user
+    await ensure_user(user.id, user.username or user.full_name)
+    user_data = await get_user(user.id)
+    is_sponsor = user_data["is_sponsor"]
+    username = user.username or f"user{user.id}"
+
+    date_str = query.data[8:]  # "confirm_YYYY-MM-DD"
+    target_date = date.fromisoformat(date_str)
+
+    # Получаем актуальную бронь (на случай, если за это время изменилась)
+    booking = await get_booking(date_str)
+
+    message = ""
+    success = False
+
+    if booking:
+        if booking["user_id"] == user.id:
+            message = "❌ Вы уже забронировали этот день."
+        elif booking["is_sponsor"] and not is_sponsor:
+            message = f"❌ Дата занята спонсором @{booking['username']}. Обычные пользователи не могут её забронировать."
+        elif not booking["is_sponsor"] and is_sponsor:
+            # Спонсор перебронирует обычного
+            success = await set_booking(date_str, user.id, username, True)
+            if success:
+                message = f"👑 Спонсор! Бронь на {target_date.strftime('%d.%m.%Y')} передана вам."
+            else:
+                message = "⚠️ Ошибка при перебронировании."
+        else:
+            # Например: обычный нажал на дату, занятую другим обычным (но это не должно происходить — кнопка не отображается)
+            message = "❌ Дата уже занята другим пользователем."
+    else:
+        # Дата свободна
+        success = await set_booking(date_str, user.id, username, is_sponsor)
+        if success:
+            mark = "👑" if is_sponsor else "❌"
+            message = f"{mark} Дата {target_date.strftime('%d.%m.%Y')} успешно забронирована!"
+        else:
+            message = "⚠️ Не удалось выполнить бронирование."
+
+    # Отправляем результат
+    await query.edit_message_text(
+        f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\n{message}",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")
+        ]]),
+        parse_mode="HTML"
+    )
+
+async def cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not in_allowed_topic(update):
+        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        return
+
+    user = query.from_user
+    date_str = query.data[7:]  # "cancel_YYYY-MM-DD"
+    target_date = date.fromisoformat(date_str)
+
+    # Проверим, что бронь действительно принадлежит пользователю
+    booking = await get_booking(date_str)
+    if not booking or booking["user_id"] != user.id:
+        await query.edit_message_text(
+            f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\n❌ Вы не можете отменить чужую бронь.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")
+            ]])
         )
         return
 
-    target_id = usernames[username]
-    db_add_sponsor(target_id)
-    # Обновим кэш (опционально)
-    sponsors_cache.add(target_id)
-    await update.message.reply_text(f"✅ @{username} теперь спонсор!")
+    # Удаляем бронь
+    await cancel_booking(date_str)
 
-async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.username:
-        usernames[user.username.lower()] = user.id  # сохраняем в нижнем регистре для надёжности
+    await query.edit_message_text(
+        f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\n✅ Ваша бронь отменена. Дата теперь свободна.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")
+        ]])
+    )
 
-# === Запуск бота ===
 def main():
-    TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-    app = Application.builder().token(TOKEN).build()
-
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("book", book))
-    app.add_handler(CommandHandler("list", list_days))
-    app.add_handler(CommandHandler("add_sponsor", add_sponsor))
-    app.add_handler(MessageHandler(filters.ALL, track_user))
-
-    print("Бот запущен...")
+    app.add_handler(CommandHandler("sponsor", sponsor_command))
+    app.add_handler(CommandHandler("unsponsor", unsponsor_command))
+    app.add_handler(CallbackQueryHandler(handle_date_callback, pattern=r"^book_"))
+    app.add_handler(CallbackQueryHandler(confirm_booking, pattern=r"^confirm_"))
+    app.add_handler(CallbackQueryHandler(cancel_booking_handler, pattern=r"^cancel_"))  # ← НОВОЕ
+    app.add_handler(CallbackQueryHandler(back_to_calendar, pattern=r"^back_calendar$"))
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

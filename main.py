@@ -15,14 +15,13 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
-
-logging.basicConfig(level=logging.INFO)
+ALLOWED_THREAD_ID = int(os.getenv("ALLOWED_THREAD_ID"))
+logging.basicConfig(level=logging.WARNING)
 
 def in_allowed_topic(update: Update) -> bool:
     msg = update.effective_message
     print(msg)
-    return bool(msg and msg.chat_id == ALLOWED_CHAT_ID)
-    # return bool(msg and msg.chat_id == ALLOWED_CHAT_ID)
+    return bool(msg and msg.chat_id == ALLOWED_CHAT_ID and msg.message_thread_id == ALLOWED_THREAD_ID)
 
 def get_dates_in_month():
     today = date.today()
@@ -72,7 +71,7 @@ async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     if not in_allowed_topic(update):
-        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        # await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
     user = query.from_user
@@ -132,7 +131,7 @@ async def back_to_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🔒 Проверка топика (для безопасности)
     if not in_allowed_topic(update):
-        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        # await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
     reply_markup = await build_calendar_keyboard()
@@ -236,7 +235,7 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🔒 Проверка топика
     if not in_allowed_topic(update):
-        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        # await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
     user = query.from_user
@@ -299,7 +298,7 @@ async def cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     if not in_allowed_topic(update):
-        await query.message.reply_text("❌ Бот доступен только в определённом топике.")
+        # await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
     user = query.from_user
@@ -331,7 +330,7 @@ async def cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not in_allowed_topic(update):
-        await update.message.reply_text("❌ Бот доступен только в определённом топике.")
+        # await update.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
     user = update.effective_user

@@ -2,11 +2,11 @@
 import os
 import logging
 from datetime import date, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from db import (
     init_db, get_user, ensure_user, set_sponsor_status,
-    get_booking, set_booking, cancel_booking  # ← ДОБАВЬ cancel_booking сюда
+    get_booking, set_booking, cancel_booking, get_user_id_by_username
 )
 from dotenv import load_dotenv
 
@@ -48,13 +48,23 @@ async def build_calendar_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-# --- /start — показывает календарь ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not in_allowed_topic(update):
         return
     user = update.effective_user
     await ensure_user(user.id, user.username or user.full_name)
-    reply_markup = await build_calendar_keyboard()
+
+    # Получаем клавиатуру как список списков
+    calendar_keyboard = await build_calendar_keyboard()
+    # keyboard — это список списков кнопок
+    keyboard = [row[:] for row in calendar_keyboard.inline_keyboard]  # делаем копию как список
+
+    # Добавляем кнопку "Закрыть" для автора
+    close_button = InlineKeyboardButton("🗑️ Закрыть", callback_data=f"close_{user.id}")
+    keyboard.append([close_button])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("📅 Выберите дату:", reply_markup=reply_markup)
 
 async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,9 +100,10 @@ async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     show_book_button = True
     if booking:
         if booking["user_id"] == user.id:
-            show_book_button = False  # уже забронировано тобой
+            show_book_button = False  # уже твоя — не показываем
         elif booking["is_sponsor"] and not is_sponsor:
             show_book_button = False  # обычный не может брать у спонсора
+
 
     if show_book_button:
         buttons.append(InlineKeyboardButton("✅ Забронировать", callback_data=f"confirm_{date_str}"))
@@ -127,36 +138,93 @@ async def back_to_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = await build_calendar_keyboard()
     await query.edit_message_text("📅 Выберите дату:", reply_markup=reply_markup)
 
+
 async def sponsor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    input_arg = context.args[0]
+
+    if input_arg.startswith('@'):
+        username = input_arg[1:]
+
     if not in_allowed_topic(update):
         return
     if update.effective_user.id != SUPER_ADMIN_ID:
         await update.message.reply_text("❌ Только супер-админ может выдавать спонсорство.")
         return
-    if not context.args:
-        await update.message.reply_text("Использование: /sponsor 123456789")
-        return
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Укажите ID (число).")
-        return
-    await set_sponsor_status(target_id, True)
-    await update.message.reply_text(f"✅ Пользователь {target_id} — теперь спонсор!")
 
-async def unsponsor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != SUPER_ADMIN_ID:
-        return
     if not context.args:
-        await update.message.reply_text("Использование: /unsponsor 123456789")
+        await update.message.reply_text(
+            "Использование:\n"
+            "/sponsor @username\n"
+            "или\n"
+            "/sponsor 123456789"
+        )
         return
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Укажите ID (число).")
+
+    input_arg = context.args[0]
+
+    # Определяем тип: username или ID
+    if input_arg.startswith('@'):
+        username = input_arg[1:]
+        target_user_id = await get_user_id_by_username(username)
+        if target_user_id is None:
+            await update.message.reply_text(
+                f"❌ Пользователь @{username} не найден в базе.\n"
+                "Он должен хотя бы раз воспользоваться ботом (нажать /start)."
+            )
+            return
+    else:
+        try:
+            target_user_id = int(input_arg)
+        except ValueError:
+            await update.message.reply_text("❌ Укажите @username.")
+            return
+
+    await set_sponsor_status(target_user_id, True)
+    await update.message.reply_text(f"✅ Пользователь {username} теперь спонсор!")
+
+
+# Аналогично для unsponsor
+async def unsponsor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    input_arg = context.args[0]
+
+    if input_arg.startswith('@'):
+        username = input_arg[1:]
+
+    if not in_allowed_topic(update):
         return
-    await set_sponsor_status(target_id, False)
-    await update.message.reply_text(f"❌ Спонсорство у {target_id} отозвано.")
+    if update.effective_user.id != SUPER_ADMIN_ID:
+        await update.message.reply_text("❌ Только супер-админ может управлять спонсорством.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/unsponsor @username\n"
+            "или\n"
+            "/unsponsor 123456789"
+        )
+        return
+
+    input_arg = context.args[0]
+
+    if input_arg.startswith('@'):
+        username = input_arg[1:]
+        target_user_id = await get_user_id_by_username(username)
+        if target_user_id is None:
+            await update.message.reply_text(
+                f"❌ Пользователь @{username} не найден в базе.\n"
+                "Он должен хотя бы раз воспользоваться ботом (нажать /start)."
+            )
+            return
+    else:
+        try:
+            target_user_id = int(input_arg)
+        except ValueError:
+            await update.message.reply_text("❌ Укажите @username или числовой ID.")
+            return
+
+    await set_sponsor_status(target_user_id, False)
+    await update.message.reply_text(f"❌ Спонсорство у пользователя {username} отозвано.")
 
 async def post_init(application: Application):
     await init_db()
@@ -193,6 +261,13 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = f"❌ Дата занята спонсором @{booking['username']}. Обычные пользователи не могут её забронировать."
         elif not booking["is_sponsor"] and is_sponsor:
             # Спонсор перебронирует обычного
+            success = await set_booking(date_str, user.id, username, True)
+            if success:
+                message = f"👑 Спонсор! Бронь на {target_date.strftime('%d.%m.%Y')} передана вам."
+            else:
+                message = "⚠️ Ошибка при перебронировании."
+        elif booking["is_sponsor"] and is_sponsor:
+            # Спонсор перебронирует спонсора
             success = await set_booking(date_str, user.id, username, True)
             if success:
                 message = f"👑 Спонсор! Бронь на {target_date.strftime('%d.%m.%Y')} передана вам."
@@ -254,15 +329,71 @@ async def cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_T
         ]])
     )
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_topic(update):
+        await update.message.reply_text("❌ Бот доступен только в определённом топике.")
+        return
+
+    user = update.effective_user
+    user_data = await get_user(user.id)
+    is_super_admin = user_data["is_super_admin"]
+    is_sponsor = user_data["is_sponsor"]
+
+    help_text = "ℹ️ <b>Booking Bot — Система бронирования дат</b>\n\n"
+
+    # Общие команды
+    help_text += "<b>Доступно всем:</b>\n"
+    help_text += "• /book — календарь бронирования. Отображает статус бронирования, даёт возможность занять дату или отказаться от неё.\n\n"
+
+    # Права
+    if is_sponsor:
+        help_text += "<b>Ваши права:</b> 👑 Спонсор\n"
+        help_text += "• Можете бронировать любые даты (включая занятые обычными и спонсорами)\n\n"
+    else:
+        help_text += "<b>Ваши права:</b> ❌ Обычный пользователь\n"
+        help_text += "• Можете бронировать только свободные даты или занятые другими обычными пользователями\n\n"
+
+    # Команды для супер-админа
+    if is_super_admin:
+        help_text += "<b>Команды супер-админа:</b>\n"
+        help_text += "• /sponsor @username — назначить спонсора\n"
+        help_text += "• /unsponsor @username — отозвать спонсорство\n"
+
+    help_text += "<i>💡 Чтобы попасть в базу — пользователь должен хотя бы раз написать /book в этом топике.</i>"
+
+    await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+async def close_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        expected_user_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("❌ Неверный формат данных.")
+        return
+
+    if query.from_user.id != expected_user_id:
+        await query.answer("🔒 Только автор может закрыть это сообщение.", show_alert=True)
+        return
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass  # Игнорируем ошибки (уже удалено, нет прав и т.д.)
+
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("book", start))
     app.add_handler(CommandHandler("sponsor", sponsor_command))
     app.add_handler(CommandHandler("unsponsor", unsponsor_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(handle_date_callback, pattern=r"^book_"))
     app.add_handler(CallbackQueryHandler(confirm_booking, pattern=r"^confirm_"))
-    app.add_handler(CallbackQueryHandler(cancel_booking_handler, pattern=r"^cancel_"))  # ← НОВОЕ
+    app.add_handler(CallbackQueryHandler(cancel_booking_handler, pattern=r"^cancel_"))
     app.add_handler(CallbackQueryHandler(back_to_calendar, pattern=r"^back_calendar$"))
+    app.add_handler(CallbackQueryHandler(close_message_handler, pattern=r"^close_\d+$"))
     app.run_polling()
 
 if __name__ == "__main__":

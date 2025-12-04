@@ -129,3 +129,15 @@ def _cancel_booking_sync(date_str: str):
 async def cancel_booking(date_str: str):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _cancel_booking_sync, date_str)
+
+def _get_user_id_by_username_sync(username: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE username = ? COLLATE NOCASE", (username,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+async def get_user_id_by_username(username: str):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_user_id_by_username_sync, username)

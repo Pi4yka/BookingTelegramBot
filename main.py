@@ -367,7 +367,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     help_text += "<i>💡 Чтобы попасть в базу — пользователь должен хотя бы раз написать /book в этом топике.</i>\n"
 
-    help_text += "<i>💎 Developer: https://github.com/Pi4yka </i>"
+    # help_text += "<i>💎 Developer: https://github.com/Pi4yka </i>"
     await update.message.reply_text(help_text, parse_mode="HTML")
 
 

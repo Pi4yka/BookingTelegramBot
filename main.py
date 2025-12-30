@@ -25,9 +25,8 @@ def in_allowed_topic(update: Update) -> bool:
 
 def get_dates_in_month():
     today = date.today()
-    next_month = (today.replace(day=28) + timedelta(days=4))
-    last_day = next_month - timedelta(days=next_month.day)
-    return [today + timedelta(days=i) for i in range((last_day - today).days + 1)]
+
+    return [today + timedelta(days=i) for i in range(30)]
 
 # --- Генерация клавиатуры календаря (выносим в отдельную функцию) ---
 async def build_calendar_keyboard():
@@ -129,12 +128,20 @@ async def back_to_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # 🔒 Проверка топика (для безопасности)
     if not in_allowed_topic(update):
-        # await query.message.reply_text("❌ Бот доступен только в определённом топике.")
         return
 
-    reply_markup = await build_calendar_keyboard()
+    user = query.from_user
+
+    # Получаем клавиатуру календаря
+    calendar_markup = await build_calendar_keyboard()
+    keyboard = [row[:] for row in calendar_markup.inline_keyboard]  # делаем копию
+
+    # Добавляем кнопку "Закрыть" для автора
+    close_button = InlineKeyboardButton("🗑️ Закрыть", callback_data=f"close_{user.id}")
+    keyboard.append([close_button])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("📅 Выберите дату:", reply_markup=reply_markup)
 
 
@@ -358,8 +365,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += "• /sponsor @username — назначить спонсора\n"
         help_text += "• /unsponsor @username — отозвать спонсорство\n"
 
-    help_text += "<i>💡 Чтобы попасть в базу — пользователь должен хотя бы раз написать /book в этом топике.</i>"
+    help_text += "<i>💡 Чтобы попасть в базу — пользователь должен хотя бы раз написать /book в этом топике.</i>\n"
 
+    help_text += "<i>💎 Developer: https://github.com/Pi4yka </i>"
     await update.message.reply_text(help_text, parse_mode="HTML")
 
 
@@ -381,6 +389,7 @@ async def close_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.delete()
     except Exception:
         pass  # Игнорируем ошибки (уже удалено, нет прав и т.д.)
+
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()

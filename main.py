@@ -16,6 +16,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 ALLOWED_THREAD_ID = int(os.getenv("ALLOWED_THREAD_ID"))
+day_delta_str = os.getenv("DAY_DELTA")
+DAY_DELTA = int(day_delta_str) if day_delta_str is not None else 14
 logging.basicConfig(level=logging.WARNING)
 
 def in_allowed_topic(update: Update) -> bool:
@@ -26,7 +28,7 @@ def in_allowed_topic(update: Update) -> bool:
 def get_dates_in_month():
     today = date.today()
 
-    return [today + timedelta(days=i) for i in range(30)]
+    return [today + timedelta(days=i) for i in range(DAY_DELTA)]
 
 # --- Генерация клавиатуры календаря (выносим в отдельную функцию) ---
 async def build_calendar_keyboard():

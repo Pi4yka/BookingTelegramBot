@@ -6,7 +6,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 DB_PATH = "reservations.db"
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID"))
+
+
+def _get_int_env(name: str) -> int:
+    value = os.getenv(name)
+    if value is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Environment variable {name} must be an integer") from exc
+
+
+SUPER_ADMIN_ID = _get_int_env("SUPER_ADMIN_ID")
 
 def _init_db_sync():
     conn = sqlite3.connect(DB_PATH)
@@ -28,9 +40,14 @@ def _init_db_sync():
             date TEXT PRIMARY KEY,
             user_id INTEGER,
             username TEXT,
-            is_sponsor BOOLEAN
+            is_sponsor BOOLEAN,
+            message TEXT
         )
     ''')
+    try:
+        c.execute("ALTER TABLE bookings ADD COLUMN message TEXT")
+    except sqlite3.OperationalError:
+        pass  # столбец уже существует (старая база)
     conn.commit()
     conn.close()
 
@@ -68,31 +85,45 @@ def _set_sponsor_status_sync(target_user_id: int, is_sponsor: bool):
 def _get_booking_sync(date_str: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT user_id, username, is_sponsor FROM bookings WHERE date = ?", (date_str,))
+    c.execute("SELECT user_id, username, is_sponsor, message FROM bookings WHERE date = ?", (date_str,))
     row = c.fetchone()
     conn.close()
     if row:
         return {
             "user_id": row[0],
             "username": row[1],
-            "is_sponsor": bool(row[2])
+            "is_sponsor": bool(row[2]),
+            "message": row[3]
         }
     return None
 
-def _set_booking_sync(date_str: str, user_id: int, username: str, is_sponsor: bool):
+def _set_booking_sync(date_str: str, user_id: int, username: str, is_sponsor: bool, message: str = None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    current = _get_booking_sync(date_str)
-    if current and current["is_sponsor"] and not is_sponsor:
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("SELECT user_id, username, is_sponsor FROM bookings WHERE date = ?", (date_str,))
+        row = c.fetchone()
+        if row and bool(row[2]) and not is_sponsor:
+            conn.rollback()
+            return False
+
+        c.execute(
+            '''
+            INSERT INTO bookings (date, user_id, username, is_sponsor, message)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                user_id = excluded.user_id,
+                username = excluded.username,
+                is_sponsor = excluded.is_sponsor,
+                message = excluded.message
+            ''',
+            (date_str, user_id, username, int(is_sponsor), message)
+        )
+        conn.commit()
+        return True
+    finally:
         conn.close()
-        return False
-    c.execute('''
-        INSERT OR REPLACE INTO bookings (date, user_id, username, is_sponsor)
-        VALUES (?, ?, ?, ?)
-    ''', (date_str, user_id, username, int(is_sponsor)))
-    conn.commit()
-    conn.close()
-    return True
 
 # Асинхронные обёртки
 async def init_db():
@@ -115,9 +146,9 @@ async def get_booking(date_str: str):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _get_booking_sync, date_str)
 
-async def set_booking(date_str: str, user_id: int, username: str, is_sponsor: bool):
+async def set_booking(date_str: str, user_id: int, username: str, is_sponsor: bool, message: str = None):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _set_booking_sync, date_str, user_id, username, is_sponsor)
+    return await loop.run_in_executor(None, _set_booking_sync, date_str, user_id, username, is_sponsor, message)
 
 def _cancel_booking_sync(date_str: str):
     conn = sqlite3.connect(DB_PATH)

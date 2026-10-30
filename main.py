@@ -1,6 +1,7 @@
 # bot.py
 import os
 import logging
+import datetime
 from datetime import date, timedelta
 from typing import List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,6 +20,8 @@ from booking_service import (
     build_booking_result_message,
 )
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
+from telegram.ext import JobQueue
 
 load_dotenv()
 
@@ -42,6 +45,7 @@ SUPER_ADMIN_ID = get_int_env("SUPER_ADMIN_ID")
 ALLOWED_CHAT_ID = get_int_env("ALLOWED_CHAT_ID")
 ALLOWED_THREAD_ID = get_int_env("ALLOWED_THREAD_ID")
 DAY_DELTA = get_int_env("DAY_DELTA", default=14)
+MEETING_THREAD_ID = get_int_env("MEETING_THREAD_ID")
 logging.basicConfig(level=logging.WARNING)
 
 MAX_BOOKING_MESSAGE_LEN = 300
@@ -422,9 +426,27 @@ async def close_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass  # Игнорируем ошибки (уже удалено, нет прав и т.д.)
 
+async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
+    question = "Когда вам удобно встретиться на этой неделе ?"
+    options = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+    await context.bot.send_poll(chat_id=ALLOWED_CHAT_ID, message_thread_id=MEETING_THREAD_ID, question=question, options=options,is_anonymous=False,allows_revoting=True,is_closed=False,allows_multiple_answers=True)
+async def test_weekly_meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != SUPER_ADMIN_ID:
+       await update.message.reply_text("❌ Только супер-админ может запускать опрос для теста.") 
+       return
+    await send_weekly_poll(context)
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    job_queue = app.job_queue
+    job_queue.run_daily(
+        send_weekly_poll,
+        time=datetime.time(hour=19, minute=0, tzinfo=ZoneInfo("Europe/Moscow")),  # настройте время
+        days=(6,),  # 6 =  воскресенье
+        name="weekly_poll",
+    )
 
     booking_conversation = ConversationHandler(
         entry_points=[CallbackQueryHandler(confirm_booking_entry, pattern=r"^confirm_")],
@@ -442,6 +464,7 @@ def main():
     app.add_handler(CommandHandler("sponsor", sponsor_command))
     app.add_handler(CommandHandler("unsponsor", unsponsor_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("test_weekly_meet", test_weekly_meet_command))
     app.add_handler(CallbackQueryHandler(handle_date_callback, pattern=r"^book_"))
     app.add_handler(booking_conversation)
     app.add_handler(CallbackQueryHandler(cancel_booking_handler, pattern=r"^cancel_\d{4}-\d{2}-\d{2}$"))

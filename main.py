@@ -1,14 +1,15 @@
-# bot.py
 import os
 import logging
 import datetime
 from datetime import date, timedelta
 from typing import List, Optional, Tuple
+import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
     ConversationHandler, MessageHandler, filters,
 )
+from telegram.request import HTTPXRequest
 from db import (
     init_db, get_user, ensure_user, set_sponsor_status,
     get_booking, set_booking, cancel_booking, get_user_id_by_username
@@ -46,6 +47,7 @@ ALLOWED_CHAT_ID = get_int_env("ALLOWED_CHAT_ID")
 ALLOWED_THREAD_ID = get_int_env("ALLOWED_THREAD_ID")
 DAY_DELTA = get_int_env("DAY_DELTA", default=14)
 MEETING_THREAD_ID = get_int_env("MEETING_THREAD_ID")
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 logging.basicConfig(level=logging.WARNING)
 
 MAX_BOOKING_MESSAGE_LEN = 300
@@ -426,11 +428,75 @@ async def close_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass  # Игнорируем ошибки (уже удалено, нет прав и т.д.)
 
-async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
-    question = "Когда вам удобно встретиться на этой неделе ?"
-    options = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+POLL_WEEKDAYS = [
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
+    "Подглядеть 👀"
+]
 
-    await context.bot.send_poll(chat_id=ALLOWED_CHAT_ID, message_thread_id=MEETING_THREAD_ID, question=question, options=options,is_anonymous=False,allows_revoting=True,is_closed=False,allows_multiple_answers=True)
+POLL_OPTION_MAX_LEN = 100  # лимит Telegram для текста варианта ответа опроса
+
+
+async def build_poll_options() -> List[str]:
+    """Формирует варианты ответа опроса: если ближайший день с таким
+    названием weekday уже забронирован в базе, добавляет пометку о брони."""
+    options = []
+    today = datetime.datetime.now(MOSCOW_TZ).date()
+    booked_info = {}  # weekday index -> описание брони (берём первый попавшийся день недели)
+
+    for offset in range(7):
+        d = today + timedelta(days=offset)
+        idx = d.weekday()  # 0 = понедельник ... 6 = воскресенье
+        if idx in booked_info:
+            continue  # уже нашли забронированный день с таким названием на этой неделе
+        booking = await get_booking(d.isoformat())
+        if not booking:
+            continue
+
+        username = str(booking.get("username") or "").lstrip("@")
+        crown = "👑 " if booking.get("is_sponsor") else ""
+        booking_message = (booking.get("message") or "").strip()
+
+        if booking_message:
+            # сообщение при бронировании есть — показываем его в опросе
+            desc = f"{crown}{username}: «{booking_message}»"
+        elif username:
+            # сообщения нет — как раньше: только имя
+            desc = f"{crown}{username}"
+        else:
+            desc = "бронь"
+
+        option = f"{POLL_WEEKDAYS[idx]} — занят: 🚫 {desc}"
+        # обрезаем под лимит Telegram (100 символов на вариант ответа)
+        if len(option) > POLL_OPTION_MAX_LEN:
+            option = option[: POLL_OPTION_MAX_LEN - 1] + "…"
+        booked_info[idx] = option
+
+    for idx, day_name in enumerate(POLL_WEEKDAYS):
+        options.append(booked_info.get(idx, day_name))
+
+    return options
+
+
+async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
+    question = "Когда вам удобно встретиться на этой неделе?"
+    options = await build_poll_options()
+
+    await context.bot.send_poll(
+        chat_id=ALLOWED_CHAT_ID,
+        message_thread_id=MEETING_THREAD_ID,
+        question=question,
+        options=options,
+        is_anonymous=False,
+        is_closed=False,
+        allows_multiple_answers=True,
+    )
+
 async def test_weekly_meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != SUPER_ADMIN_ID:
        await update.message.reply_text("❌ Только супер-админ может запускать опрос для теста.") 
@@ -438,13 +504,23 @@ async def test_weekly_meet_command(update: Update, context: ContextTypes.DEFAULT
     await send_weekly_poll(context)
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # Кастомный HTTP-транспорт: увеличенные таймауты помогают переживать
+    # кратковременные сетевые сбои Telegram API (502 Bad Gateway и т.п.)
+    request = HTTPXRequest(connect_timeout=20.0, read_timeout=30.0, media_write_timeout=60.0)
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .request(request)
+        .build()
+    )
 
     job_queue = app.job_queue
     job_queue.run_daily(
         send_weekly_poll,
-        time=datetime.time(hour=19, minute=0, tzinfo=ZoneInfo("Europe/Moscow")),  # настройте время
-        days=(6,),  # 6 =  воскресенье
+        time=datetime.time(hour=19, minute=0, tzinfo=MOSCOW_TZ),
+        days=(6,),  # APScheduler (как в python-telegram-bot): 0=пн ... 6=вс — проверено, срабатывает в воскресенье
         name="weekly_poll",
     )
 
@@ -470,6 +546,21 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_booking_handler, pattern=r"^cancel_\d{4}-\d{2}-\d{2}$"))
     app.add_handler(CallbackQueryHandler(back_to_calendar, pattern=r"^back_calendar$"))
     app.add_handler(CallbackQueryHandler(close_message_handler, pattern=r"^close_\d+$"))
+
+    # Обработчик ошибок: сетевые сбои Telegram (502 Bad Gateway и т.п.) — штатная ситуация,
+    # PTB сам переподключается; пишем компактную строку вместо простыни трейсбеков в журнал.
+    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+        exc = context.error
+        if isinstance(exc, telegram.error.NetworkError):
+            logging.getLogger("bot").warning(
+                "Сетевая ошибка при работе с Telegram API (бот автоматически продолжит polling): %s",
+                exc,
+            )
+            return  # не логируем полный traceback для временных сетевых сбоев
+        logging.getLogger("bot").exception("Необработанное исключение в обработчике:", exc_info=exc)
+
+    app.add_error_handler(on_error)
+
     app.run_polling()
 
 if __name__ == "__main__":

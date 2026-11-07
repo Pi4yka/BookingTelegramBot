@@ -443,17 +443,26 @@ POLL_OPTION_MAX_LEN = 100  # лимит Telegram для текста вариа�
 
 
 async def build_poll_options() -> List[str]:
-    """Формирует варианты ответа опроса: если ближайший день с таким
-    названием weekday уже забронирован в базе, добавляет пометку о брони."""
+    """Формирует варианты ответа опроса на СЛЕДУЮЩУЮ неделю (ПН-ВС)."""
     options = []
     today = datetime.datetime.now(MOSCOW_TZ).date()
-    booked_info = {}  # weekday index -> описание брони (берём первый попавшийся день недели)
+    
+    # Вычисляем, сколько дней осталось до ближайшего понедельника
+    days_to_monday = (7 - today.weekday()) % 7
+    if days_to_monday == 0:  # Если сегодня уже понедельник, берем следующий
+        days_to_monday = 7
+        
+    next_monday = today + timedelta(days=days_to_monday)
+    
+    booked_info = {}  # weekday index -> описание брони
 
     for offset in range(7):
-        d = today + timedelta(days=offset)
+        d = next_monday + timedelta(days=offset)
         idx = d.weekday()  # 0 = понедельник ... 6 = воскресенье
+        
         if idx in booked_info:
             continue  # уже нашли забронированный день с таким названием на этой неделе
+            
         booking = await get_booking(d.isoformat())
         if not booking:
             continue
@@ -463,10 +472,8 @@ async def build_poll_options() -> List[str]:
         booking_message = (booking.get("message") or "").strip()
 
         if booking_message:
-            # сообщение при бронировании есть — показываем его в опросе
             desc = f"{crown}{username}: «{booking_message}»"
         elif username:
-            # сообщения нет — как раньше: только имя
             desc = f"{crown}{username}"
         else:
             desc = "бронь"
@@ -475,8 +482,10 @@ async def build_poll_options() -> List[str]:
         # обрезаем под лимит Telegram (100 символов на вариант ответа)
         if len(option) > POLL_OPTION_MAX_LEN:
             option = option[: POLL_OPTION_MAX_LEN - 1] + "…"
+            
         booked_info[idx] = option
 
+    # Собираем финальный список (0-6 дни недели + 7-й элемент "Подглядеть 👀")
     for idx, day_name in enumerate(POLL_WEEKDAYS):
         options.append(booked_info.get(idx, day_name))
 

@@ -493,7 +493,7 @@ async def build_poll_options() -> List[str]:
 
 
 async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
-    question = "Когда вам удобно встретиться на этой неделе?"
+    question = "Когда вам удобно встретиться на следующей неделе?"
     options = await build_poll_options()
 
     await context.bot.send_poll(
@@ -528,8 +528,8 @@ def main():
     job_queue = app.job_queue
     job_queue.run_daily(
         send_weekly_poll,
-        time=datetime.time(hour=19, minute=0, tzinfo=MOSCOW_TZ),
-        days=(6,),  # APScheduler (как в python-telegram-bot): 0=пн ... 6=вс — проверено, срабатывает в воскресенье
+        time=datetime.time(hour=18, minute=00, tzinfo=MOSCOW_TZ),
+        days=(0,),
         name="weekly_poll",
     )
 

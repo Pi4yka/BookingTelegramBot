@@ -53,6 +53,25 @@ logging.basicConfig(level=logging.WARNING)
 MAX_BOOKING_MESSAGE_LEN = 300
 ASK_BOOKING_MESSAGE = 1
 
+NON_SPONSOR_BOOKING_WARNING = (
+    "⚠️ Бронирование каморки фактически предполагает, что у вас есть ключ "
+    "(обычно — у спонсоров 👑). Забронировавший берёт на себя ответственность "
+    "за сохранность и чистоту помещения."
+)
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+logging.basicConfig(level=logging.WARNING)
+
+WEEKDAYS_RU_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WEEKDAYS_RU_FULL = ["Понедельник", "Вторник", "Среда", "Четверг",
+                    "Пятница", "Суббота", "Воскресенье"]
+
+def weekday_short_ru(d: date) -> str:
+    return WEEKDAYS_RU_SHORT[d.weekday()]
+
+def weekday_full_ru(d: date) -> str:
+    return WEEKDAYS_RU_FULL[d.weekday()]
+
 def in_allowed_topic(update: Update) -> bool:
     msg = update.effective_message
     return bool(msg and msg.chat_id == ALLOWED_CHAT_ID and msg.message_thread_id == ALLOWED_THREAD_ID)
@@ -72,7 +91,10 @@ async def build_calendar_keyboard():
         is_booked = booking is not None
         is_sponsor_booking = booking["is_sponsor"] if booking else False
         emoji = "👑" if is_sponsor_booking else "❌" if is_booked else "📅"
-        row.append(InlineKeyboardButton(f"{emoji} {d.strftime('%d.%m')}", callback_data=f"book_{d_str}"))
+        row.append(InlineKeyboardButton(
+            f"{emoji} {d.strftime('%d.%m')} {weekday_short_ru(d)}",
+            callback_data=f"book_{d_str}",
+        ))
         if len(row) == 3:
             keyboard.append(row)
             row = []
@@ -130,7 +152,11 @@ async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status_line = format_status_line(booking)
 
-    text = f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\nСтатус: {status_line}"
+    text = (
+    f"📅 <b>{weekday_full_ru(target_date)}, "
+    f"{target_date.strftime('%d.%m.%Y')}</b>\n\n"
+    f"Статус: {status_line}"
+    )
 
     buttons = []
 
@@ -249,6 +275,7 @@ async def confirm_booking_entry(update: Update, context: ContextTypes.DEFAULT_TY
     date_str = query.data[8:]  # "confirm_YYYY-MM-DD"
     target_date = date.fromisoformat(date_str)
     target_date_label = target_date.strftime('%d.%m.%Y')
+    target_date_header = f"{weekday_full_ru(target_date)}, {target_date_label}"
 
     # Получаем актуальную бронь (на случай, если за это время изменилась)
     booking = await get_booking(date_str)
@@ -257,15 +284,16 @@ async def confirm_booking_entry(update: Update, context: ContextTypes.DEFAULT_TY
     if not decision.should_write:
         message = build_booking_result_message(decision, booking, target_date_label, False)
         await query.edit_message_text(
-            f"📅 <b>{target_date_label}</b>\n\n{message}",
+            f"📅 <b>{target_date_header}</b>\n\n{message}",
             reply_markup=_back_to_calendar_markup(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return ConversationHandler.END
 
     context.user_data["pending_booking"] = {
         "date_str": date_str,
         "target_date_label": target_date_label,
+        "target_date_header": target_date_header,   # из прошлого патча
         "user_id": user.id,
         "username": username,
         "write_as_sponsor": decision.write_as_sponsor,
@@ -273,10 +301,19 @@ async def confirm_booking_entry(update: Update, context: ContextTypes.DEFAULT_TY
         "booking": booking,
     }
 
-    await query.edit_message_text(
-        f"📅 <b>{target_date_label}</b>\n\n"
+    prompt = (
+        f"📅 <b>{target_date_header}</b>\n\n"
+    )
+    if not is_sponsor:
+        prompt += f"{NON_SPONSOR_BOOKING_WARNING}\n\n"
+
+    prompt += (
         "✏️ Введите сообщение, которое увидят другие пользователи при просмотре этой даты "
-        "(например, во сколько вас искать), или нажмите «Пропустить».",
+        "(например, во сколько вас искать), или нажмите «Пропустить»."
+    )
+
+    await query.edit_message_text(
+        prompt,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("⏭️ Пропустить", callback_data="skip_booking_message"),
@@ -305,7 +342,7 @@ async def _finalize_booking(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     result_text = build_booking_result_message(
         pending["decision"], pending["booking"], pending["target_date_label"], success
     )
-    text = f"📅 <b>{pending['target_date_label']}</b>\n\n{result_text}"
+    text = f"📅 <b>{pending['target_date_header']}</b>\n\n{result_text}"
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -349,23 +386,30 @@ async def cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_T
     date_str = query.data[7:]  # "cancel_YYYY-MM-DD"
     target_date = date.fromisoformat(date_str)
 
+    target_date_label = target_date.strftime('%d.%m.%Y')
+    target_date_header = f"{weekday_full_ru(target_date)}, {target_date_label}"
+
     # Проверим, что бронь действительно принадлежит пользователю
     booking = await get_booking(date_str)
     if not booking or booking["user_id"] != user.id:
+        # если бронь чужая
         await query.edit_message_text(
-            f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\n❌ Вы не можете отменить чужую бронь.",
+            f"📅 <b>{weekday_full_ru(target_date)}, {target_date.strftime('%d.%m.%Y')}</b>\n\n"
+            "❌ Вы не можете отменить чужую бронь.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")
             ]])
         )
         return
+    
 
     # Удаляем бронь
     await cancel_booking(date_str)
 
     await query.edit_message_text(
-        f"📅 <b>{target_date.strftime('%d.%m.%Y')}</b>\n\n✅ Ваша бронь отменена. Дата теперь свободна.",
+        f"📅 <b>{weekday_full_ru(target_date)}, {target_date.strftime('%d.%m.%Y')}</b>\n\n"
+        "✅ Ваша бронь отменена. Дата теперь свободна.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")
@@ -387,7 +431,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Общие команды
     help_text += "<b>Доступно всем:</b>\n"
     help_text += "• /book — календарь бронирования. Отображает статус бронирования, даёт возможность занять дату или отказаться от неё.\n"
-    help_text += "• При бронировании можно оставить сообщение (например, во сколько вас искать) — его увидят другие пользователи при просмотре этой даты.\n\n"
+    help_text += "• При бронировании можно оставить сообщение (например, во сколько вас искать) — его увидят другие пользователи при просмотре этой даты.\n"
+    help_text += (
+    "• ⚠️ Бронирование каморки фактически предполагает, что у вас есть ключ "
+    "(обычно — у спонсоров 👑). Забронировавший берёт на себя ответственность "
+    "за сохранность и чистоту помещения.\n\n"
+    )
 
     # Права
     if is_sponsor:

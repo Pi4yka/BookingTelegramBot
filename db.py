@@ -2,10 +2,15 @@
 import sqlite3
 import os
 import asyncio
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
-DB_PATH = "reservations.db"
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+DB_DIR = DATA_DIR
+DB_PATH = DB_DIR / "reservations.db"
 
 
 def _get_int_env(name: str) -> int:
@@ -21,6 +26,12 @@ def _get_int_env(name: str) -> int:
 SUPER_ADMIN_ID = _get_int_env("SUPER_ADMIN_ID")
 
 def _init_db_sync():
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    
+    legacy = Path("reservations.db")
+    if legacy.exists() and not DB_PATH.exists():
+        legacy.rename(DB_PATH)   # перенести старую БД в data/
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
